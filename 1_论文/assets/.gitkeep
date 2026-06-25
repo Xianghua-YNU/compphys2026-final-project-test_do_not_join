@@ -1,0 +1,103 @@
+# 基于无分箱最大似然法的 X 射线脉冲星计时与 Glitch 探测研究
+
+## 1. 物理背景
+
+脉冲星是快速自转的中子星，其射电/X射线脉冲到达时间（Time of Arrival, TOA）的精确测量对检验引力理论、探测引力波、研究中子星内部结构具有重要意义。对于 X 射线脉冲星（如 SGR 1935+2154），由于光子流量低、轮廓信噪比差，传统折叠轮廓方法难以获得高精度的 TOA。因此，需要利用**无分箱最大似然法**（Unbinned Maximum Likelihood）来构建高保真度的脉冲轮廓模板，并基于该模板通过相位连接法计算 TOA。
+
+此外，脉冲星的自转频率会受到 **glitch**（星震）事件影响发生突变。为了研究 glitch 前后的自转参数变化，需要对观测数据进行**分步计时**（Step-wise Timing）分析：即将 TOA 序列按时间窗口分段，每段单独拟合星历参数（$F_0$ 和 $F_1$），观察频率及其导数随时间的演化规律。
+
+---
+
+## 2. 控制方程
+
+### 2.1 相位泰勒展开
+
+脉冲星相位的泰勒展开公式为：
+
+$$
+\phi(t) = \phi_0 + F_0 \cdot \Delta t + \frac{1}{2} F_1 \cdot (\Delta t)^2 + \frac{1}{6} F_2 \cdot (\Delta t)^3
+$$
+
+其中 $\Delta t = (t - t_{\text{epoch}}) \times 86400$ 秒（将 MJD 差转换为秒）。
+
+### 2.2 TOA 计算公式
+
+通过模板匹配确定相位零点对应的绝对时刻：
+
+$$
+t_{\text{TOA}} = t_{\text{ref}} - \frac{\phi_0}{F_0}
+$$
+
+---
+
+## 3. 研究目标
+
+本项目旨在实现一套从原始光子相位数据（`phase.fits`）到高精度星历参数拟合的完整自动化 workflow，覆盖 X 射线脉冲星计时分析的全链条。以 SGR 1935+2154 的多段 NICER/NUSTAR 观测数据为例，验证该流程的科学有效性，并尝试探测可能的自转异常（glitch）信号。
+
+---
+
+## 4. 数值方法
+
+### 4.1 数据合并与预处理
+
+读取多段、多望远镜的 `*_phases.fits` 文件，合并所有光子的脉冲相位（`PULSE_PHASE`）、质心修正时间（`BARYTIME`）及 MJD 信息。
+
+### 4.2 标准模板生成（Non-parametric Template）
+
+1. 从所有观测段中选取信噪比最高的单轨道轮廓；
+2. 使用高斯滤波（`scipy.ndimage.gaussian_filter1d`）进行平滑降噪；
+3. 通过三次样条插值（`scipy.interpolate.interp1d`）细化到 $10^{-4}$ 周期的精细网格；
+4. 归一化为概率密度函数（PDF），用于后续无分箱最大似然计算。
+
+### 4.3 模板质量评估与优选
+
+使用 `batch_compare_templates.py` 对多组候选模板（`all`/`nicer_p1`/`nicer_p2`/`nustar_p1`/`nustar_p2` 等）进行一一匹配评估，基于 H-test、$\chi^2$ 和对数似然值综合选出最优模板。
+
+### 4.4 TOA 计算（Unbinned Maximum Likelihood）
+
+基于 `toa_search` 库（`lcfitters.py`, `toagen.py`）实现无分箱 TOA 生成器。对每个时间窗口 $[t_{\text{start}}, t_{\text{end}}]$ 内的光子，以 $t_{\text{ref}}$ 为参考时刻，通过最大化似然函数寻找最佳相位偏移 $\phi_0$，进而换算为 TOA。
+
+### 4.5 分步计时（Step-wise Timing）
+
+- 使用滑动窗口（窗口大小约 5–8 个 TOA，步长 1）将 TOA 序列分段；
+- 对每段计算窗口中值 MJD 作为 `PEPOCH`；
+- 将初始星历的 $F_0$ 和 $F_1$ 线性外推至该 `PEPOCH`，生成对应窗口的 `.par` 文件；
+- 分别进行固定 $F_1$ 与拟合 $F_1$ 两种策略的 tempo2 拟合，比较残差行为。
+
+### 4.6 Glitch 检测
+
+通过 `toa_exec_pora.py` 将全部数据统一用 P1 段星历计算 TOA，绘制 phase-MJD 关系图，观察二次曲线偏离（glitch 特征）。
+
+### 4.7 验证方案
+
+| 验证维度 | 方法 |
+|---------|------|
+| **模板可靠性** | 通过 H-test 显著性水平和轮廓积分面积 $=1$ 的 PDF 约束验证模板物理合理性 |
+| **TOA 精度** | 对比不同望远镜（NICER vs NUSTAR）在同一段内的 TOA 一致性 |
+| **拟合收敛性** | 检查 tempo2 拟合的 $\|\chi^2_{\text{red}} - 1\|$ 是否接近 0，后验参数误差是否随光子数增加而减小（$\propto N^{-1/2}$） |
+| **能量守恒/相位连续性** | 相邻窗口的 $F_0$ 外推值应连续，若出现跳变则提示 glitch |
+
+---
+
+## 5. 拟实现的目标
+
+### 5.1 基础目标（Must-have）
+
+- [ ] 实现 `merge_all_phases.py`，完成多源 `phase.fits` 数据合并；
+- [ ] 实现 `generate_standard_template.py` 与 `generate_all_data_template.py`，生成高斯平滑+插值后的标准 PDF 模板；
+- [ ] 实现 `toa_exec.py`，基于最优模板批量计算所有观测段的 `.tim` 文件；
+- [ ] 实现 `generate_step_timing_p1/p2/p3.py`，自动生成滑动窗口对应的 `.par` 文件并调用 tempo2 完成分步计时拟合；
+- [ ] 绘制标准轮廓模板、TOA 残差图、分步计时 $F_0$ / $F_1$ 演化图。
+
+### 5.2 进阶目标（Nice-to-have）
+
+- [ ] 实现 `batch_compare_templates.py` 的自动化模板优选模块，引入 AIC/BIC 信息准则进行模型选择；
+- [ ] 实现 `convert_nof1.py` 等辅助脚本，支持固定/释放 $F_1$ 的批量对比实验；
+- [ ] 对 SGR 1935+2154 的 P1/P2/P3 段数据完成完整分步计时分析，尝试定位 glitch 发生时刻并估算跃变大小 $\Delta\nu / \nu$；
+- [ ] 将 NICER 与 NUSTAR 的计时结果进行交叉验证，评估不同能段/仪器对 TOA 精度的影响。
+
+### 5.3 预期交付物
+
+1. **完整 Python 代码库**（含 `toa_search` 核心模块与顶层 workflow 脚本）；
+2. **符合期刊格式规范的期末论文**（含方法、结果、讨论）；
+3. **现场汇报 PPT**（展示 workflow 流程图、关键结果图与 glitch 检测结论）。
